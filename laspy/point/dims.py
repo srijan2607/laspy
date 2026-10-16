@@ -650,9 +650,11 @@ class SubFieldView(ArrayView):
         return (self.array & self.bit_mask) >> self.lsb
 
     def _do_comparison(self, value, comp):
-        if isinstance(value, (int, type(self.array.dtype))):
-            if value > self.max_value_allowed:
-                return np.zeros_like(self.array, bool)
+        if isinstance(value, (int, np.integer)):
+            # Shift Python integers so narrow NumPy scalars cannot wrap.
+            value = int(value)
+            if value < 0 or value > self.max_value_allowed:
+                return np.full_like(self.array, comp(0, value), dtype=bool)
         return comp(self.array & self.bit_mask, value << self.lsb)
 
     def __array__(self, *args, **kwargs):
