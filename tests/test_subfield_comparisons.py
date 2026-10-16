@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import laspy
+from laspy.header import LAS_HEADERS_SIZE
 from laspy.point.dims import SubFieldView
 
 
@@ -81,6 +82,58 @@ def test_subfield_array_threshold_and_equality_controls():
     np.testing.assert_array_equal(field != 2, decoded != 2)
 
 
+@pytest.mark.parametrize("mask", [128, 240])
+@pytest.mark.parametrize(
+    "compare", [operator.lt, operator.le, operator.ge, operator.gt]
+)
+@pytest.mark.parametrize("dtype", [np.int8, np.uint8, np.int64])
+@pytest.mark.parametrize("zero_dimensional", [False, True])
+def test_subfield_array_thresholds_do_not_shift_or_overflow(
+    mask, compare, dtype, zero_dimensional
+):
+    packed = np.arange(256, dtype=np.uint8)
+    original = packed.copy()
+    shift = (mask & -mask).bit_length() - 1
+    decoded = [int(byte) // (2**shift) % ((mask >> shift) + 1) for byte in packed]
+    bounds = [0, 1, 2, 15, 16, 127, int(np.iinfo(dtype).max)]
+    if np.issubdtype(dtype, np.signedinteger):
+        bounds.insert(0, -1)
+    thresholds = (
+        [np.array(bound, dtype=dtype) for bound in bounds]
+        if zero_dimensional
+        else [np.resize(np.array(bounds, dtype=dtype), packed.shape)]
+    )
+    for threshold in thresholds:
+        expected = [
+            compare(value, int(bound))
+            for value, bound in zip(decoded, np.broadcast_to(threshold, packed.shape))
+        ]
+        np.testing.assert_array_equal(
+            compare(SubFieldView(packed, mask), threshold), expected
+        )
+    np.testing.assert_array_equal(packed, original)
+
+
+@pytest.mark.parametrize("point_format", [0, 3, 6, 10])
+@pytest.mark.parametrize(
+    "compare", [operator.lt, operator.le, operator.ge, operator.gt]
+)
+def test_subfield_comparison_with_another_field(point_format, compare):
+    las = laspy.create(point_format=point_format)
+    las.X = [11, 22, 33, 44]
+    returns = [1, 2, 3, 1]
+    totals = [1, 3, 3, 2]
+    las.return_number = returns
+    las.number_of_returns = totals
+    expected = [compare(number, total) for number, total in zip(returns, totals)]
+    np.testing.assert_array_equal(
+        compare(las.return_number, las.number_of_returns), expected
+    )
+    np.testing.assert_array_equal(
+        las[las.return_number < las.number_of_returns].X, [22, 44]
+    )
+
+
 @pytest.mark.parametrize("point_format", [0, 3, 6, 10])
 @pytest.mark.parametrize("scalar_type", [int, np.uint8, np.int64])
 def test_subfield_filter_keeps_points_below_exclusive_domain_bound(
@@ -96,18 +149,20 @@ def test_subfield_filter_keeps_points_below_exclusive_domain_bound(
     destination = io.BytesIO()
     filtered.write(destination)
     data = destination.getvalue()
-    # Inspect standard little-endian point count and X bytes without laspy's reader.
-    count_offset = 107 if point_format < 6 else 247
-    count_format = "<I" if point_format < 6 else "<Q"
-    assert struct.unpack_from(count_format, data, count_offset)[0] == 4
-    offset = struct.unpack_from("<I", data, 96)[0]
-    size = struct.unpack_from("<H", data, 105)[0]
-    assert [struct.unpack_from("<i", data, offset + i * size)[0] for i in range(4)] == [
-        11,
-        22,
-        33,
-        44,
-    ]
+    # No VLRs: derive the layout, then inspect emitted records without a reader.
+    offset = LAS_HEADERS_SIZE[str(filtered.header.version)]
+    size = filtered.point_format.size
+    assert len(data) == offset + 4 * size
+    x_offset = filtered.point_format.dtype().fields["X"][1]
+    assert [
+        struct.unpack_from("<i", data, offset + i * size + x_offset)[0]
+        for i in range(4)
+    ] == [11, 22, 33, 44]
+    id_offset = filtered.point_format.dtype().fields["point_source_id"][1]
+    assert [
+        struct.unpack_from("<H", data, offset + i * size + id_offset)[0]
+        for i in range(4)
+    ] == [51, 52, 53, 54]
     destination.seek(0)
     reread = laspy.read(destination)
     np.testing.assert_array_equal(reread.points.array, las.points.array)

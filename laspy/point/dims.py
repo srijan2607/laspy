@@ -655,7 +655,8 @@ class SubFieldView(ArrayView):
             value = int(value)
             if value < 0 or value > self.max_value_allowed:
                 return np.full_like(self.array, comp(0, value), dtype=bool)
-        return comp(self.array & self.bit_mask, value << self.lsb)
+            return comp(self.array & self.bit_mask, value << self.lsb)
+        return comp(self.masked_array(), np.asarray(value))
 
     def __array__(self, *args, **kwargs):
         ret = self.masked_array()
